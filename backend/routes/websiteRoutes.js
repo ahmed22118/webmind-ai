@@ -6,6 +6,7 @@ import {
   getWebsiteById,
   getWebsiteChunks,
   testSearch,
+  deleteWebsite,
 } from "../controllers/websiteController.js";
 import { askQuestion, getConversationHistory, clearConversationHistory } from "../controllers/chatController.js";
 import { protect } from "../middleware/authMiddleware.js";
@@ -51,5 +52,6 @@ router.post("/:id/test-search", searchLimiter, validateBody(testSearchSchema), t
 router.post("/:id/ask", askLimiter, validateBody(askQuestionSchema), askQuestion);
 router.get("/:id/conversations", getConversationHistory);
 router.delete("/:id/conversations", clearConversationHistory);
+router.delete("/:id", deleteWebsite);
 
 export default router;

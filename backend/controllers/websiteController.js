@@ -1,4 +1,5 @@
 import { generateEmbedding } from "../services/embeddingService.js";
+import Conversation from "../models/Conversation.js";
 import { upsertChunks, queryChunks } from "../services/vectorStore.js";
 import Chunk from "../models/Chunk.js";
 import { processHtmlIntoChunks } from "../services/contentProcessor.js";
@@ -131,6 +132,21 @@ export async function getWebsiteChunks(req, res) {
 
   const chunks = await Chunk.find({ website: website._id }).sort({ pageUrl: 1, chunkIndex: 1 });
   res.status(200).json({ website: website.rootUrl, totalChunks: chunks.length, chunks });
+}
+export async function deleteWebsite(req, res) {
+  try {
+    const website = await Website.findOne({ _id: req.params.id, owner: req.user._id });
+    if (!website) return res.status(404).json({ message: "Website not found" });
+
+    await Page.deleteMany({ website: website._id });
+    await Chunk.deleteMany({ website: website._id });
+    await Conversation.deleteMany({ website: website._id });
+    await website.deleteOne();
+
+    res.status(200).json({ message: "Website deleted" });
+  } catch (err) {
+    return sendError(res, 500, "Failed to delete website", err, "deleteWebsite");
+  }
 }
 
 export async function testSearch(req, res) {
