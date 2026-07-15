@@ -8,7 +8,11 @@ import rateLimit from "express-rate-limit";
 
 dotenv.config();
 
-const app = express();
+// Render (and most cloud platforms) sit behind a reverse proxy that adds
+// X-Forwarded-For headers. Trusting exactly one hop tells Express (and
+// express-rate-limit) to correctly read the real client IP from that header,
+// rather than rejecting requests due to an untrusted proxy setup.
+app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173").split(",");
 
