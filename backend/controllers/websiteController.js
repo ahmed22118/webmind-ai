@@ -1,12 +1,13 @@
-import { generateEmbedding } from "../services/embeddingService.js";
-import Conversation from "../models/Conversation.js";
-import { upsertChunks, queryChunks } from "../services/vectorStore.js";
-import Chunk from "../models/Chunk.js";
-import { processHtmlIntoChunks } from "../services/contentProcessor.js";
-import { assertSafeCrawlTarget } from "../utils/ssrfGuard.js";
 import Website from "../models/Website.js";
 import Page from "../models/Page.js";
+import Chunk from "../models/Chunk.js";
+import Conversation from "../models/Conversation.js";
 import { crawlWebsite } from "../services/crawler.js";
+import { processHtmlIntoChunks } from "../services/contentProcessor.js";
+import { generateEmbedding } from "../services/embeddingService.js";
+import { upsertChunks, queryChunks } from "../services/vectorStore.js";
+import { assertSafeCrawlTarget } from "../utils/ssrfGuard.js";
+import { sendError } from "../utils/errorResponse.js";
 
 export async function createWebsite(req, res) {
   try {
@@ -28,8 +29,8 @@ export async function createWebsite(req, res) {
     if (!forceRecrawl) {
       const existingMatch = await Website.findOne({
         owner: req.user._id,
-         status: "completed",
-        rrootUrl: new RegExp(`^${normalizedRootUrl}/?$`, "i"),
+        status: "completed",
+        rootUrl: new RegExp(`^${normalizedRootUrl}/?$`, "i"),
       });
 
       if (existingMatch) {
@@ -46,55 +47,55 @@ export async function createWebsite(req, res) {
 
     const maxPages = parseInt(process.env.MAX_CRAWL_PAGES, 10) || 25;
 
-    // Synchronous for MVP: request waits until the crawl finishes
+    // Synchronous for MVP: request waits until the crawl finishes.
+    // Each page is processed fully (save -> chunk -> embed -> clear HTML)
+    // immediately as it's crawled, rather than accumulating all pages in
+    // memory first — keeps peak memory low, important on constrained hosting.
     try {
-      const savedPages = [];
-
-      const pagesCrawled = await crawlWebsite(url, maxPages, async ({ url, title, html }) => {
-        const page = await Page.create({ website: website._id, url, title, rawHtml: html });
-        savedPages.push(page);
-      });
-
-      // Clean + chunk every crawled page, then embed and store vectors
       let totalChunks = 0;
-      for (const page of savedPages) {
-        const chunks = processHtmlIntoChunks(page.rawHtml, page.url);
-        if (chunks.length === 0) continue;
 
-        const savedChunks = await Chunk.insertMany(
-          chunks.map((c) => ({
-            website: website._id,
-            page: page._id,
-            pageUrl: page.url,
-            pageTitle: page.title,
-            chunkIndex: c.chunkIndex,
-            content: c.content,
-            wordCount: c.wordCount,
-          }))
-        );
+      const pagesCrawled = await crawlWebsite(url, maxPages, async ({ url: pageUrl, title, html }) => {
+        const page = await Page.create({ website: website._id, url: pageUrl, title, rawHtml: html });
 
-        // Generate an embedding for each chunk and push to ChromaDB
-        const vectorChunks = [];
-        for (const chunk of savedChunks) {
-          // Strip inline "(https://...)" links before embedding — they're noise for
-// semantic search, even though we keep them in the stored content for the
-// LLM to cite. This keeps retrieval quality high while still preserving links.
-const textForEmbedding = chunk.content.replace(/\s*\(https?:\/\/[^)]+\)/g, "");
-const embedding = await generateEmbedding(textForEmbedding || chunk.content);
-          vectorChunks.push({
-            id: chunk._id.toString(),
-            embedding,
-            content: chunk.content,
-            websiteId: website._id.toString(),
-            pageUrl: chunk.pageUrl,
-            pageTitle: chunk.pageTitle,
-            chunkIndex: chunk.chunkIndex,
-          });
+        const chunks = processHtmlIntoChunks(html, pageUrl);
+
+        if (chunks.length > 0) {
+          const savedChunks = await Chunk.insertMany(
+            chunks.map((c) => ({
+              website: website._id,
+              page: page._id,
+              pageUrl: page.url,
+              pageTitle: page.title,
+              chunkIndex: c.chunkIndex,
+              content: c.content,
+              wordCount: c.wordCount,
+            }))
+          );
+
+          const vectorChunks = [];
+          for (const chunk of savedChunks) {
+            // Strip inline "(https://...)" links before embedding — they're
+            // noise for semantic search, even though we keep them in the
+            // stored content for the LLM to cite later.
+            const textForEmbedding = chunk.content.replace(/\s*\(https?:\/\/[^)]+\)/g, "");
+            const embedding = await generateEmbedding(textForEmbedding || chunk.content);
+            vectorChunks.push({
+              id: chunk._id.toString(),
+              embedding,
+              content: chunk.content,
+              websiteId: website._id.toString(),
+              pageUrl: chunk.pageUrl,
+              pageTitle: chunk.pageTitle,
+              chunkIndex: chunk.chunkIndex,
+            });
+          }
+          await upsertChunks(vectorChunks);
+          totalChunks += savedChunks.length;
         }
-        await upsertChunks(vectorChunks);
 
+        // Clear raw HTML immediately — we're done with it for this page
         await Page.updateOne({ _id: page._id }, { $unset: { rawHtml: "" } });
-      }
+      });
 
       website.status = "completed";
       website.pagesCrawled = pagesCrawled;
@@ -102,6 +103,7 @@ const embedding = await generateEmbedding(textForEmbedding || chunk.content);
       website.crawledAt = new Date();
       await website.save();
     } catch (err) {
+      console.error("Crawl/embedding pipeline failed:", err);
       website.status = "failed";
       website.error = err.message;
       await website.save();
@@ -133,6 +135,7 @@ export async function getWebsiteChunks(req, res) {
   const chunks = await Chunk.find({ website: website._id }).sort({ pageUrl: 1, chunkIndex: 1 });
   res.status(200).json({ website: website.rootUrl, totalChunks: chunks.length, chunks });
 }
+
 export async function deleteWebsite(req, res) {
   try {
     const website = await Website.findOne({ _id: req.params.id, owner: req.user._id });
@@ -167,6 +170,6 @@ export async function testSearch(req, res) {
 
     res.status(200).json({ query, results });
   } catch (err) {
-    return sendError(res, 500, "Failed to start crawl. Please try again.", err, "createWebsite");
+    return sendError(res, 500, "Search failed", err, "testSearch");
   }
 }

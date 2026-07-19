@@ -34,7 +34,10 @@ export async function crawlWebsite(rootUrl, maxPages, onPageCrawled) {
   const queue = [normalizeUrl(rootUrl)];
   let pagesCrawled = 0;
 
- const browser = await chromium.launch({ headless: true });
+ const browser = await chromium.launch({
+  headless: true,
+  args: ["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"],
+});
   const context = await browser.newContext({
     userAgent: "WebMindAI-Crawler/1.0 (+https://webmind.ai/bot)",
   });
